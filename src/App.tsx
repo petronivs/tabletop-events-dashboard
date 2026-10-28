@@ -9,6 +9,10 @@ import { PwaControls } from './PwaControls';
 
 const defaultFilters: AgendaFilters = { date: 'all', role: 'all', search: '' };
 
+/**
+ * Keeps credentials in form memory and clears them after every settled attempt.
+ * The parent discards the form on successful sign-in, cancellation, or logout.
+ */
 function SignIn({ submit, busy, online }: {
   submit: (input: DeveloperCredentials) => Promise<void>;
   busy: string | null;
@@ -133,6 +137,15 @@ function Agenda({ snapshot, stale, busy, filters, setFilters }: {
   </>;
 }
 
+/**
+ * Renders the personal agenda with explicit badges and convention-zone times.
+ *
+ * @remarks
+ * Pass the single page-lifetime schedule client through the client prop.
+ * Delegates lifecycle and safe failures to {@link useAgenda}. Filters are local
+ * presentation only. Offline use can show this document's stale memory snapshot;
+ * reopening restores only the shell. PWA update consent invokes logout first.
+ */
 export function App({ client }: { client: ScheduleClient }) {
   const model = useAgenda(client);
   const [filters, setFilters] = useState<AgendaFilters>(defaultFilters);

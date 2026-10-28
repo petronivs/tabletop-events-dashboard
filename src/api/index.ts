@@ -13,12 +13,80 @@ import { checkOperation, Transport, type Operation } from './transport';
 
 export { ApiError } from './errors';
 
+/**
+ * Memory-only developer session and complete personal-schedule reads.
+ *
+ * @remarks
+ * Only one discovery or schedule read may run at a time; competing reads reject
+ * with `busy`. Login and logout invalidate prior work. Read failures reject with
+ * safe {@link ApiError} codes, never raw server messages. A current-session
+ * expiry clears authentication and aborts its operations; cancellation and
+ * generation checks prevent late results from restoring discarded state.
+ */
 export interface ScheduleClient {
+  /** Reports local authentication only; does not probe server session validity. */
   getSessionState(): SessionState;
+  /**
+   * Invalidates the previous session before attempting developer-account sign-in.
+   *
+   * @param input - Runtime credentials, including the API key ID, not its private key.
+   * The client does not mutate this object; the caller must clear its form state.
+   * @param options - Optional cancellation for this attempt.
+   * @returns Resolves after session and user identities validate. No token is exposed.
+   * @throws {@link ApiError} - Promise rejection for failed validation, access,
+   * transport, cancellation, or expiry. Login is never automatically retried.
+   * @remarks
+   * Credentials are not saved for reuse. Cancelling an attempt prevents local
+   * acceptance but cannot guarantee revocation of a session created remotely.
+   */
   login(input: DeveloperCredentials, options?: RequestOptions): Promise<void>;
+  /**
+   * Discovers the union of conventions from verified, non-cart owned badges and
+   * account-hosted events, including ended conventions and hosts without badges.
+   *
+   * @returns All discovered choices, or an empty list for no memberships.
+   * Failures reject rather than fall back to a public convention catalog.
+   */
   listConventions(options?: RequestOptions): Promise<readonly ConventionChoice[]>;
+  /**
+   * Revalidates verified, non-cart badges owned by this account in a convention.
+   *
+   * @param conventionId - Exact convention identity; no badges are auto-selected.
+   * @returns Eligible choices. An empty list is valid if the account hosts there.
+   * @throws {@link ApiError} - Promise rejection with `invalid-selection` for an
+   * invalid ID or a convention with neither eligible badges nor hosted events.
+   * Authentication, transport, and validation failures also reject.
+   */
   listBadges(conventionId: string, options?: RequestOptions): Promise<readonly BadgeChoice[]>;
+  /**
+   * Stages a complete agenda from fresh hosting, badge, ticket, and timezone reads.
+   *
+   * @param selection - Copied and canonicalized to sorted unique badge IDs.
+   * An empty badge set means hosting only; selected badges must still be owned
+   * and eligible. Verified event-linked, non-cart tickets establish attendance,
+   * not payment, pickup, likes, or reservation records.
+   * @returns A complete snapshot, never a partial update. Both membership roles
+   * apply to the first and all additional sessions; inactive rows remain visible.
+   * @throws {@link ApiError} - Promise rejection for invalid selection, incomplete
+   * pagination/session counts, malformed data, budget exhaustion, or read failure.
+   * @remarks
+   * Complete hosted Event objects from this operation replace redundant detail
+   * reads; incomplete ones and ticket-only events require details. The Event is
+   * the first session; its sessions collection contains only additional sessions.
+   * A supplied session count must equal one plus that collection's length.
+   * A count of one skips the collection read; a missing count still fetches it.
+   * No snapshot is retained by the client, and completion is not an atomic
+   * server transaction. The caller owns any same-selection stale snapshot.
+   */
   loadSchedule(selection: ScheduleSelection, options?: RequestOptions): Promise<ScheduleSnapshot>;
+  /**
+   * Clears local authentication and aborts prior work before the first await,
+   * then attempts server revocation once through the shared queue.
+   *
+   * @returns Resolves even on revocation failure; inspect the revocation status.
+   * Local sign-out does not prove the server session ended. Reload or closing
+   * the page does not itself call this method or guarantee server revocation.
+   */
   logout(): Promise<LogoutResult>;
 }
 
@@ -112,6 +180,16 @@ function canonicalSelection(selection: ScheduleSelection): ScheduleSelection {
   }
 }
 
+/**
+ * Creates an isolated, memory-only developer session and sequential request queue.
+ *
+ * @returns A client to create once outside React rendering and reuse for this page.
+ * @remarks
+ * No credentials, tokens, selections, or agendas are persisted. Reloading loses
+ * local access. All request starts are spaced by at least 1,100 ms; only reads
+ * receive bounded retries. Operations have 30-minute and 1,000-request budgets,
+ * including retry attempts, with a 30-second timeout per request.
+ */
 export function createScheduleClient(): ScheduleClient {
   const transport = new Transport();
   const contexts = new Set<Context>();

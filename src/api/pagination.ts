@@ -1,6 +1,20 @@
 import { identity, integer, record, type RecordData } from '../domain/validation';
 import { ApiError } from './errors';
 
+/**
+ * Reads a complete collection using numbered pages of up to 100 requested items.
+ *
+ * @param read - Fetches and unwraps one result with the supplied paging/qualifier fields.
+ * @param qualifiers - Applied on every page; paging fields take precedence.
+ * @returns Validated object records in page order, never a successful truncated list.
+ * @throws {@link ApiError} - Promise rejection for malformed paging or incomplete
+ * counts, changing metadata, duplicate IDs, or the 200-page/20,000-item safety cap.
+ * Field guards can also reject with InvalidData; the client maps that failure.
+ * @remarks
+ * Uses total pages, not the unreliable next-page field. Empty zero-page and
+ * one-page responses are accepted. Consistent metadata cannot prove a
+ * transactional server snapshot.
+ */
 export async function collection(
   read: (parameters: Record<string, string>) => Promise<unknown>,
   qualifiers: Record<string, string> = {},

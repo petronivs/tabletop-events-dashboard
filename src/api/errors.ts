@@ -16,6 +16,10 @@ const messages: Record<ApiErrorCode, string> = {
   busy: 'Another schedule operation is still running.',
 };
 
+/**
+ * Public failure with a typed category and safe locally selected message.
+ * Raw server messages, response bodies, request URLs, and causes are not attached.
+ */
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
 
@@ -26,7 +30,9 @@ export class ApiError extends Error {
   }
 }
 
+/** Internal retry marker for read requests; login/logout never retry automatically. */
 export class RetryableError extends ApiError {
+  /** Usable Retry-After delay in milliseconds; the transport also enforces its backoff. */
   readonly retryAfterMs: number;
 
   constructor(code: 'network' | 'rate-limited' | 'service-unavailable', retryAfterMs = 0) {

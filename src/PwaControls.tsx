@@ -5,6 +5,21 @@ interface InstallEvent extends Event {
   prompt(): Promise<{ outcome: 'accepted' | 'dismissed' }>;
 }
 
+/**
+ * Offers browser-dependent installation and consent-gated app-shell updates.
+ *
+ * @remarks
+ * The onBeforeUpdate prop must clear local personal state even if server
+ * revocation cannot be confirmed. Confirmation awaits that callback before this
+ * tab requests activation/reload; rejection leaves reload unapproved.
+ * App supplies its best-effort logout handler.
+ *
+ * Another tab's worker activation only offers an update here, unless this tab has
+ * already approved reload. The explicit confirmation awaits sign-out first.
+ * Offline readiness refers only to the configured local shell cache, never
+ * stored authentication or a private offline agenda. Installation does not change
+ * the memory-only session lifetime.
+ */
 export function PwaControls({ onBeforeUpdate }: { onBeforeUpdate: () => Promise<void> }) {
   const installEvent = useRef<InstallEvent | null>(null);
   const updateWorker = useRef<((reloadPage?: boolean) => Promise<void>) | null>(null);
