@@ -409,3 +409,60 @@ string counts of one skip that request, and other counts are consistency-checked
 Malformed supplied hosted fields fail validation rather than being hidden by a
 detail fallback. Ticket-only events still require detail reads. No hosted objects
 are retained across operations or refreshes.
+
+### Convention discovery summaries (issue #6)
+
+Rechecked 2026-10-28 without credentials or authenticated requests:
+
+- **Documented:** [Badge Related Objects](https://tabletop.events/developer/Badge.html#Related_Objects)
+  and [Event Related Objects](https://tabletop.events/developer/Event.html#Related_Objects)
+  both list `convention`. The Introduction's
+  [Related Objects](https://tabletop.events/developer/Introduction.html#Related_Objects)
+  describes `_include_related_objects=convention` as a short related object nested
+  under `convention`, not a separate list or a `_relationships` URI.
+- **Public-observed:** Two bounded anonymous GETs, spaced at least 1,100 ms apart,
+  read `/api/convention?_items_per_page=1` solely to identify a public convention,
+  then `/api/convention/{cid}/events?_items_per_page=1&_include_related_objects=convention`.
+  The sampled Chaosium Con 2023 Event contained `convention` with an exact matching
+  `id`, `object_type: "convention"`, and `name: "Chaosium Con 2023"`. This sample also
+  supplied UTC `start_date: "2023-04-13 22:00:00"`,
+  `end_date: "2023-04-16 22:00:00"`, numeric `has_ended: 1`, and `geolocation_id`.
+  No timezone field appeared on the embedded convention. Date/ended metadata may
+  inform future #7 work; this optimization neither consumes nor requires it and
+  does not group, filter, or reorder choices by date.
+- **Authenticated-unverified:** No owned-badge or self `events-hosted` requests
+  were made. Public Event nesting and the generic include contract do not prove
+  that those authenticated collections honor the include or return identical
+  fields. Absent/null related objects or omitted required summary fields still
+  require the existing validated individual convention read.
+
+`listConventions` requests `_include_related_objects=convention` on **every page**
+of its existing owned-badge (`verified=1`) and account-hosted reads. After normal
+parent validation, only owned, verified, non-cart badges and actual hosted
+membership can supply summaries. Excluded badge objects cannot inject choices,
+rescue incomplete summaries, or invalidate eligible related data.
+
+Only exact case-sensitive `id` and nonblank string `name` are needed for a choice;
+`object_type`, when supplied, must be `"convention"`. An absent/null related object
+or an omitted ID/name is incomplete. Supplied malformed values (including null,
+empty or numeric IDs/names), mismatched IDs/types, and contradictory supplied names
+fail discovery explicitly, even on partial records or when another record is
+complete. Partial names must also agree with fallback details. Unused related
+fields are not projected or validated as schedule metadata.
+
+All eligible badge/host pages are collected before any fallback. One complete
+valid related record supplies the choice even if other eligible records lack
+information. Separate partial records are not stitched into a complete summary.
+Missing summaries require only one logical detail read per distinct convention
+ID across both collections (subject to the existing bounded transport retries).
+Choices retain their existing exact-ID sort order, including past and host-only
+conventions. All required fallbacks must succeed before publishing the list;
+validation, access, cancellation, expiry, pagination or budget failures reject
+the whole operation, never a shortened successful list.
+
+These summaries exist only within the current discovery operation. No global
+catalog, cross-operation/account cache, background fetch, unrelated agenda or
+timezone read is added. `loadSchedule` continues to read the selected convention
+and its geolocation/timezone freshly on every load/refresh, for past conventions
+as well as current ones; discovery data is never schedule truth. With complete
+summaries, discovery avoids one individual convention request per distinct choice.
