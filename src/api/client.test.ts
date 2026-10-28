@@ -480,6 +480,277 @@ describe('membership and staged snapshots', () => {
   });
 });
 
+describe('operation-local convention summaries', () => {
+  const summary = { id: 'Convention', name: 'Synthetic convention' };
+  const detailCalls = (calls: readonly WireCall[]) =>
+    calls.filter((call) => /^\/api\/convention\/[^/]+$/u.test(call.url.pathname));
+
+  it('uses complete owned/host summaries without details, retaining past, host-only and case-sensitive choices', async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') return list([
+        { ...badge, verified: 1, convention: summary },
+        { ...badge, id: 'AnotherBadge', convention: { ...summary, object_type: 'convention' } },
+        { ...badge, id: 'Friend', user_id: 'Other', convention: false },
+        { ...badge, id: 'Cart', conventioncart_id: 'Cart', convention_id: 'Cart', convention: [] },
+        { ...badge, id: 'Unverified', verified: 0, convention_id: 'Unverified', convention: 'invalid' },
+      ]);
+      if (call.url.pathname.endsWith('/events-hosted')) return list([
+        { ...event, convention: summary },
+        { id: 'PastHost', convention_id: 'Past', convention: {
+          id: 'Past', object_type: 'convention', name: 'Past hosting only',
+          start_date: '2023-04-13 22:00:00', end_date: '2023-04-16 22:00:00', has_ended: 1,
+        } },
+        { id: 'LowercaseHost', convention_id: 'convention', convention: {
+          id: 'convention', name: 'Distinct lowercase identity',
+        } },
+      ]);
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    expect(await complete(client.listConventions())).toEqual([
+      summary, { id: 'Past', name: 'Past hosting only' },
+      { id: 'convention', name: 'Distinct lowercase identity' },
+    ]);
+    expect(calls.map((call) => call.url.pathname)).toEqual([
+      '/api/session', '/api/user/User/badges', '/api/user/User/events-hosted',
+    ]);
+    for (const call of calls.slice(1)) {
+      expect(call.body.get('_include_related_objects')).toBe('convention');
+      expect(call.body.get('_items_per_page')).toBe('100');
+      expect(call.body.has('convention_id')).toBe(false);
+    }
+    expect(calls[1]?.body.get('verified')).toBe('1');
+  });
+
+  it.each([undefined, null, {}, { id: 'Convention' }, { name: 'Synthetic convention' }])(
+    'falls back once per distinct ID for absent/partial summaries: %j', async (related) => {
+      const calls = stubFetch((call) => {
+        if (call.url.pathname === '/api/user/User/badges') return list([
+          { ...badge, convention: related }, { ...badge, id: 'SecondBadge', convention: related },
+        ]);
+        if (call.url.pathname.endsWith('/events-hosted')) return list([
+          { ...event, convention: related }, { ...event, id: 'SecondEvent', convention: related },
+          { id: 'PastHost', convention_id: 'Past', convention: null },
+        ]);
+        if (call.url.pathname === '/api/convention/Past') {
+          return response({ id: 'Past', name: 'Past convention', has_ended: '1' });
+        }
+        return defaultResponse(call);
+      });
+      const client = createScheduleClient();
+      await complete(client.login(credentials));
+      expect(await complete(client.listConventions())).toEqual([
+        summary, { id: 'Past', name: 'Past convention' },
+      ]);
+      expect(detailCalls(calls).map((call) => call.url.pathname)).toEqual([
+        '/api/convention/Convention', '/api/convention/Past',
+      ]);
+      expect(calls.some((call) => call.url.pathname.startsWith('/api/geolocation/'))).toBe(false);
+    },
+  );
+
+  it('collects all badge and host pages before deciding which distinct conventions need fallback', async () => {
+    const calls = stubFetch((call) => {
+      const badges = call.url.pathname === '/api/user/User/badges';
+      if (badges || call.url.pathname.endsWith('/events-hosted')) {
+        const page = Number(call.body.get('_page_number'));
+        const items = badges ? [
+          { ...badge, convention: { id: 'Convention' } },
+          { ...badge, id: 'SecondBadge', convention: summary },
+        ] : [
+          { ...event, convention: { name: 'Synthetic convention' } },
+          { id: 'PastHost', convention_id: 'Past', convention: { id: 'Past', name: 'Past host' } },
+        ];
+        return response({
+          items: [items[page - 1]],
+          paging: { total_items: '2', total_pages: 2, page_number: page, items_per_page: '1' },
+        });
+      }
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    expect(await complete(client.listConventions())).toEqual([
+      summary, { id: 'Past', name: 'Past host' },
+    ]);
+    expect(detailCalls(calls)).toHaveLength(0);
+    const memberships = calls.slice(1);
+    expect(memberships.map((call) => call.body.get('_page_number'))).toEqual(['1', '2', '1', '2']);
+    expect(memberships.every((call) =>
+      call.body.get('_include_related_objects') === 'convention',
+    )).toBe(true);
+  });
+
+  it('uses a later complete host summary instead of a partial owned-badge fallback', async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') {
+        return list([{ ...badge, convention: { name: summary.name } }]);
+      }
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{ ...event, convention: summary }]);
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    expect(await complete(client.listConventions())).toEqual([summary]);
+    expect(detailCalls(calls)).toHaveLength(0);
+  });
+
+  it('does not use excluded badge summaries to supply missing eligible information or add choices', async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') return list([
+        badge,
+        { ...badge, id: 'Friend', user_id: 'Other', convention: { ...summary, name: 'Friend name' } },
+        { ...badge, id: 'Cart', conventioncart_id: 'Cart', convention_id: 'Foreign',
+          convention: { id: 'Foreign', name: 'Cart convention' } },
+        { ...badge, id: 'Unverified', verified: '0', convention_id: 'Foreign',
+          convention: { id: 'Foreign', name: 'Unverified convention' } },
+      ]);
+      if (call.url.pathname.endsWith('/events-hosted')) return list([]);
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    expect(await complete(client.listConventions())).toEqual([summary]);
+    expect(detailCalls(calls).map((call) => call.url.pathname)).toEqual(['/api/convention/Convention']);
+  });
+
+  it.each([
+    [], 'invalid', false, { id: 'Other' }, { id: 'convention' }, { id: null }, { id: 7 },
+    { id: '' }, { name: null }, { name: 7 }, { name: '' }, { name: '   ' },
+    { object_type: 'event' }, { object_type: null },
+  ])('rejects malformed or mismatched eligible related fields even alongside a complete summary: %j', async (related) => {
+    for (const source of ['badge', 'host']) {
+      const calls = stubFetch((call) => {
+        if (call.url.pathname === '/api/user/User/badges') return list([
+          { ...badge, convention: summary },
+          ...(source === 'badge' ? [{ ...badge, id: 'PartialBadge', convention: related }] : []),
+        ]);
+        if (call.url.pathname.endsWith('/events-hosted')) {
+          return list([{ ...event, convention: source === 'host' ? related : summary }]);
+        }
+        return defaultResponse(call);
+      });
+      const client = createScheduleClient();
+      await complete(client.login(credentials));
+      await expect(complete(client.listConventions())).rejects.toHaveProperty('code', 'invalid-response');
+      expect(detailCalls(calls)).toHaveLength(0);
+    }
+  });
+
+  it.each([true, false])('rejects contradictory names, including partial summaries (partial: %s)', async (partial) => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') return list([{ ...badge, convention: summary }]);
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{
+        ...event, convention: { ...(partial ? {} : { id: summary.id }), name: 'Contradictory name' },
+      }]);
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    await expect(complete(client.listConventions())).rejects.toHaveProperty('code', 'invalid-response');
+    expect(detailCalls(calls)).toHaveLength(0);
+  });
+
+  it('does not combine separate incomplete records into a complete summary or accept contradictory fallback names', async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') {
+        return list([{ ...badge, convention: { name: 'Partial name' } }]);
+      }
+      if (call.url.pathname.endsWith('/events-hosted')) {
+        return list([{ ...event, convention: { id: 'Convention' } }]);
+      }
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    await expect(complete(client.listConventions())).rejects.toHaveProperty('code', 'invalid-response');
+    expect(detailCalls(calls)).toHaveLength(1);
+  });
+
+  it.each([
+    () => errorResponse(450),
+    () => response({ id: 'Other', name: 'Wrong convention' }),
+    () => response({ id: 'MissingName' }),
+  ])('rejects the whole discovery when a later distinct fallback fails validation or access', async (fallback) => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') return list([{ ...badge, convention: summary }]);
+      if (call.url.pathname.endsWith('/events-hosted')) {
+        return list([{ id: 'Host', convention_id: 'MissingName' }]);
+      }
+      if (call.url.pathname === '/api/convention/MissingName') return fallback();
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    await expect(complete(client.listConventions())).rejects.toBeInstanceOf(ApiError);
+    expect(detailCalls(calls)).toHaveLength(1);
+  });
+
+  it.each(['aborted', 'session-expired'] as const)(
+    'does not publish complete summaries when the remaining fallback is %s', async (failure) => {
+      const controller = new AbortController();
+      const publish = vi.fn();
+      const calls = stubFetch((call) => {
+        if (call.url.pathname === '/api/user/User/badges') return list([{ ...badge, convention: summary }]);
+        if (call.url.pathname.endsWith('/events-hosted')) {
+          return list([{ id: 'Host', convention_id: 'Missing' }]);
+        }
+        if (call.url.pathname === '/api/convention/Missing') {
+          if (failure === 'aborted') {
+            controller.abort();
+            return response({ id: 'Missing', name: 'Late fallback' });
+          }
+          return errorResponse(451);
+        }
+        return defaultResponse(call);
+      });
+      const client = createScheduleClient();
+      await complete(client.login(credentials));
+      const result = client.listConventions({ signal: controller.signal }).then(publish);
+      await expect(complete(result)).rejects.toHaveProperty('code', failure);
+      expect(publish).not.toHaveBeenCalled();
+      expect(detailCalls(calls)).toHaveLength(1);
+      expect(client.getSessionState()).toBe(failure === 'aborted' ? 'authenticated' : 'signed-out');
+    },
+  );
+
+  it('uses fresh discovery summaries each time and fresh selected convention/timezone details on every schedule load', async () => {
+    let name = 'Initial discovery';
+    let zone = 'America/Chicago';
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/user/User/badges') {
+        return list([{ ...badge, convention: { ...summary, name } }]);
+      }
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{ ...event, session_count: 1 }]);
+      if (call.url.pathname === '/api/convention/Convention') {
+        return response({ ...summary, name, geolocation_id: 'Location' });
+      }
+      if (call.url.pathname === '/api/geolocation/Location') {
+        return response({ id: 'Location', timezone: zone });
+      }
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    expect(await complete(client.listConventions())).toEqual([{ ...summary, name }]);
+    name = 'Updated discovery';
+    expect(await complete(client.listConventions())).toEqual([{ ...summary, name }]);
+    expect(detailCalls(calls)).toHaveLength(0);
+    name = 'Fresh selected convention';
+    const selection = { conventionId: 'Convention', badgeIds: [] };
+    const first = await complete(client.loadSchedule(selection));
+    expect(first).toMatchObject({ convention: { ...summary, name }, timeZone: zone });
+    name = 'Fresh selected refresh';
+    zone = 'America/New_York';
+    const second = await complete(client.loadSchedule(selection));
+    expect(second).toMatchObject({ convention: { ...summary, name }, timeZone: zone });
+    expect(detailCalls(calls)).toHaveLength(2);
+    expect(calls.filter((call) => call.url.pathname === '/api/geolocation/Location')).toHaveLength(2);
+    expect(calls.some((call) => call.url.pathname.startsWith('/api/event/'))).toBe(false);
+  });
+});
+
 describe('session, cancellation and logout races', () => {
   it('requires authentication and permits only one high-level read at a time', async () => {
     stubFetch(defaultResponse);

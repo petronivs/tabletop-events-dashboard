@@ -46,6 +46,11 @@ export interface ScheduleClient {
    *
    * @returns All discovered choices, or an empty list for no memberships.
    * Failures reject rather than fall back to a public convention catalog.
+   * @remarks
+   * Reuses validated related convention IDs/names from this operation only.
+   * After all membership pages are collected, missing summaries require one
+   * detail lookup per distinct convention. Invalid or conflicting supplied
+   * summaries reject the whole discovery. Schedule loads still read fresh details.
    */
   listConventions(options?: RequestOptions): Promise<readonly ConventionChoice[]>;
   /**
@@ -122,12 +127,45 @@ function segment(id: string): string {
   return encodeURIComponent(identity(id));
 }
 
-function convention(raw: unknown, expected: string): ConventionChoice {
+/** Validates supplied choice fields even when a short related object is incomplete. */
+function conventionFields(raw: unknown, expected: string) {
   const value = record(raw);
   objectType(value, 'convention');
-  const id = identity(value.id);
-  if (id !== expected) throw new InvalidData();
-  return { id, name: text(value.name) };
+  const id = value.id === undefined ? undefined : identity(value.id);
+  const name = value.name === undefined ? undefined : text(value.name);
+  if (id !== undefined && id !== expected) throw new InvalidData();
+  return { id, name };
+}
+
+function convention(raw: unknown, expected: string): ConventionChoice {
+  const { id, name } = conventionFields(raw, expected);
+  if (id === undefined || name === undefined) throw new InvalidData();
+  return { id, name };
+}
+
+interface DiscoverySummary {
+  name: string | undefined;
+  complete: boolean;
+}
+
+/**
+ * Collects only eligible membership summaries; callers validate the parent first.
+ * Partial names still constrain later summaries/details. A complete record must
+ * supply both ID and name; separate partial records are not stitched into one.
+ */
+function collectConvention(
+  summaries: Map<string, DiscoverySummary>, parent: RecordData,
+): void {
+  const cid = identity(parent.convention_id);
+  const fields = parent.convention === undefined || parent.convention === null
+    ? { id: undefined, name: undefined } : conventionFields(parent.convention, cid);
+  const previous = summaries.get(cid);
+  if (previous?.name !== undefined && fields.name !== undefined &&
+      previous.name !== fields.name) throw new InvalidData();
+  summaries.set(cid, {
+    name: fields.name ?? previous?.name,
+    complete: previous?.complete === true || (fields.id !== undefined && fields.name !== undefined),
+  });
 }
 
 function ownedBadges(
@@ -319,19 +357,29 @@ export function createScheduleClient(): ScheduleClient {
 
     listConventions(options) {
       return runRead(options, async (operation, account) => {
-        const badges = ownedBadges(await list(
-          operation, account, `/api/user/${segment(account.userId)}/badges`, { verified: '1' },
-        ), account.userId);
-        const hosted = hostedMembership(await list(operation, account, hostPath(account)));
-        const ids = [...new Set([
-          ...badges.map((badge) => badge.conventionId),
-          ...[...hosted.values()].map((event) => identity(event.convention_id)),
-        ])].sort();
+        const includes = { _include_related_objects: 'convention' };
+        const badgeItems = await list(
+          operation, account, `/api/user/${segment(account.userId)}/badges`,
+          { verified: '1', ...includes },
+        );
+        const eligible = new Set(ownedBadges(badgeItems, account.userId).map((badge) => badge.id));
+        const summaries = new Map<string, DiscoverySummary>();
+        for (const badge of badgeItems) {
+          if (eligible.has(identity(badge.id))) collectConvention(summaries, badge);
+        }
+        const hosted = hostedMembership(await list(operation, account, hostPath(account), includes));
+        for (const event of hosted.values()) collectConvention(summaries, event);
         const choices: ConventionChoice[] = [];
-        for (const id of ids) {
-          choices.push(convention(await read(
-            operation, account, `/api/convention/${segment(id)}`,
-          ), id));
+        for (const [id, summary] of [...summaries].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+          if (summary.complete && summary.name !== undefined) {
+            choices.push({ id, name: summary.name });
+          } else {
+            const choice = convention(await read(
+              operation, account, `/api/convention/${segment(id)}`,
+            ), id);
+            if (summary.name !== undefined && summary.name !== choice.name) throw new InvalidData();
+            choices.push(choice);
+          }
         }
         return choices;
       });
