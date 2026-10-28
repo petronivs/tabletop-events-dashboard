@@ -55,6 +55,12 @@ Use Node.js 24 LTS (24.15+) or a compatible newer Node release. Development HMR 
 - Keep changes small and focused; match the style of surrounding code.
 - Update this file when you add commands, change the stack, or learn something future agents need to know.
 
+### Source documentation
+
+- Maintain targeted [TSDoc](https://tsdoc.org/) `/** ... */` comments on exported APIs, hooks/components, and non-obvious contracts so editor IntelliSense hover/signature help explains usage and side effects.
+- Keep summaries concise; use `@remarks`, `@param name - description`, `@returns`, `@throws`, and `{@link ...}` only when useful. Explain promise rejections explicitly; do not repeat TypeScript types or blanket-comment obvious helpers.
+- Update comments with behavior changes, especially session privacy, cancellation, selection/stale-data rules, and UTC/convention-zone handling.
+
 ## Repository workflow
 
 - Before changes, search for an existing GitHub tracking issue; reuse it or create one if none covers the work.

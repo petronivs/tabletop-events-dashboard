@@ -35,10 +35,35 @@ const emptyPersonal = (): PersonalState => ({
   conventions: [], conventionsReady: false, conventionId: '', badges: [], badgeIds: [], badgesReady: false, snapshot: null,
 });
 
+/** Builds a comparison key independent of badge order or duplicate badge IDs. */
 export function selectionKey(selection: ScheduleSelection): string {
   return JSON.stringify([selection.conventionId, [...new Set(selection.badgeIds)].sort()]);
 }
 
+/**
+ * Coordinates memory-only personal state, explicit badge selection, and manual reads.
+ *
+ * @param client - A stable client created outside React rendering; this hook owns
+ * the UI snapshot, not the client's session token.
+ * @returns Current selection, snapshot, safe status text, and user-action handlers.
+ * Async handlers report failures through `error` rather than rejecting API errors.
+ * `credentialEpoch` lets the sign-in form discard credentials on logout or expiry.
+ * @remarks
+ * Login clears personal state and discovers conventions after success. No badge
+ * is selected automatically; an empty set loads hosting only. Convention/badge
+ * changes erase the snapshot immediately. A same-selection refresh keeps the
+ * previous complete snapshot and timestamp while loading and on failures other
+ * than `not-authenticated` or `session-expired`, including selection-validation
+ * failures. Those two error codes, logout, and login erase personal state.
+ * Successful discovery also resets the selection and snapshot; failed discovery
+ * leaves them intact unless one of those two authentication errors occurs.
+ *
+ * Replacement reads abort and await prior work before entering the client's
+ * single-read boundary. Generation and mounted checks ignore late results.
+ * Unmount aborts active reads, but does not revoke the client session. Offline
+ * status is advisory: handlers do not enforce it; the UI disables network actions.
+ * Nothing is persisted or restored after reload.
+ */
 export function useAgenda(client: ScheduleClient) {
   const [personal, setPersonal] = useState<PersonalState>(emptyPersonal);
   const [authenticated, setAuthenticated] = useState(false);
@@ -85,6 +110,10 @@ export function useAgenda(client: ScheduleClient) {
     setError(code ? errorText[code] : 'Something went wrong. Please try again. No technical or account details are displayed.');
   }
 
+  /**
+   * Serializes replacement reads and maps current-generation errors into UI state.
+   * Only the active controller may release the busy state during cleanup.
+   */
   function read(
     label: string,
     action: (signal: AbortSignal) => Promise<void>,
@@ -192,6 +221,10 @@ export function useAgenda(client: ScheduleClient) {
     }, context);
   }
 
+  /**
+   * Erases personal/form state before waiting for best-effort server sign-out.
+   * Revocation failure becomes a notice, not restored authentication.
+   */
   async function logout() {
     const context = invalidate();
     active.current = null;

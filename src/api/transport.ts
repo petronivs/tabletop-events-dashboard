@@ -1,21 +1,30 @@
 import { integer, record } from '../domain/validation';
 import { ApiError, RetryableError } from './errors';
 
+/** Shared cancellation and cumulative safety budget for one high-level operation. */
 export interface Operation {
   signal: AbortSignal;
+  /** Started wire attempts, including retries, across all lists/details. */
   requests: number;
+  /** Absolute epoch-millisecond deadline, checked before queued attempts. */
   expiresAt: number;
 }
 
+/** Preserves a safe ApiError abort reason, otherwise supplies the local `aborted` error. */
 export function abortError(signal: AbortSignal): ApiError {
   return signal.reason instanceof ApiError ? signal.reason : new ApiError('aborted');
 }
 
+/** Throws synchronously on cancellation or deadline expiry, before more work starts. */
 export function checkOperation(operation: Operation): void {
   if (operation.signal.aborted) throw abortError(operation.signal);
   if (Date.now() >= operation.expiresAt) throw new ApiError('incomplete-refresh');
 }
 
+/**
+ * Rejects promptly on cancellation even if work ignores its own signal.
+ * Does not cancel the underlying promise; its eventual settlement remains observed.
+ */
 export function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(abortError(signal));
@@ -25,6 +34,7 @@ export function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> 
   });
 }
 
+/** Waits a nonnegative timer-safe delay; cancellation rejects and clears its timer. */
 export function pause(milliseconds: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
@@ -77,10 +87,38 @@ function allowedPath(path: string, method: 'GET' | 'POST' | 'DELETE'): boolean {
   ].some((pattern) => new RegExp(pattern, 'u').test(path));
 }
 
+/**
+ * Internal allowlisted, form-body transport with one sequential queue per instance.
+ *
+ * @remarks
+ * All wire requests are POSTs; logical reads/deletes use the X-HTTP-Method query
+ * override. Parameters, including read session IDs, stay in the form body.
+ * The documented logout path is the token-bearing URL exception. Cookies are
+ * omitted, redirects rejected, caching disabled, and referrers suppressed.
+ * HTTP/envelope errors map to safe codes without exposing upstream details.
+ */
 export class Transport {
   private tail: Promise<void> = Promise.resolve();
   private lastStart: number | null = null;
 
+  /**
+   * Queues an allowlisted logical request and unwraps its non-null result.
+   *
+   * @param path - Encoded API path, not an arbitrary relationship URL.
+   * @param method - Logical API verb, independently checked against the path.
+   * @param parameters - Form fields used for every attempt; do not mutate while pending.
+   * @param operation - Shared signal, deadline, and 1,000-attempt budget.
+   * @param expire - Invalidates the current client session on a mapped expiry error.
+   * @returns The untrusted result payload, still requiring domain validation.
+   * @throws {@link ApiError} - Promise rejection for transport/status/envelope
+   * failures, cancellation, timeout, or exhausted budgets. Invalid record fields
+   * can instead reject with InvalidData for the client to map.
+   * @remarks
+   * Starts are at least 1,100 ms apart. Only logical GETs retry network failures,
+   * 452/429, and 500/504, at most twice, waiting at least 2 then 4 seconds or a
+   * longer usable Retry-After. Login/logout and timeouts are not retried.
+   * Each wire attempt has a 30-second timeout, including reading its JSON body.
+   */
   async request(
     path: string,
     method: 'GET' | 'POST' | 'DELETE',
