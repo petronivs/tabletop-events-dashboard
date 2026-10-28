@@ -296,6 +296,38 @@ describe('membership and staged snapshots', () => {
     expect(JSON.stringify(snapshot)).not.toContain('Ticket');
   });
 
+  it.each([1, '1'])('skips additional-session requests when session_count is %s', async (sessionCount) => {
+    const calls = stubFetch((call) => call.url.pathname === '/api/event/Event'
+      ? response({ ...event, session_count: sessionCount }) : defaultResponse(call));
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
+    expect(snapshot.rows).toHaveLength(1);
+    expect(snapshot.rows[0]).toMatchObject({
+      key: 'Convention:event:Event', roles: ['hosting', 'attending'],
+    });
+    expect(calls.some((call) => call.url.pathname === '/api/event/Event/sessions')).toBe(false);
+  });
+
+  it.each([undefined, 2, '2'])('fetches additional sessions when session_count is %s', async (sessionCount) => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname === '/api/event/Event') return response({ ...event, session_count: sessionCount });
+      if (call.url.pathname === '/api/event/Event/sessions') return list([{
+        id: 'Additional', event_id: 'Event', convention_id: 'Convention',
+        session_name: 'Additional session', start_date: null, duration: null,
+        is_scheduled: 0, published_to_schedule: 0,
+      }]);
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
+    expect(snapshot.rows.map((row) => row.key)).toEqual([
+      'Convention:event:Event', 'Convention:eventsession:Additional',
+    ]);
+    expect(calls.filter((call) => call.url.pathname === '/api/event/Event/sessions')).toHaveLength(1);
+  });
+
   it('supports hosting only, never reads unselected tickets, and refreshes hosting truth', async () => {
     let hosted = true;
     const calls = stubFetch((call) => {

@@ -329,9 +329,11 @@ export function createScheduleClient(): ScheduleClient {
           if (identity(parent.id) !== id) throw new InvalidData();
           const eventRoles = (['hosting', 'attending'] as const).filter((role) => membership.has(role));
           const first = agendaRow(parent, parent, cid, eventRoles, 'event');
-          const sessions = await list(operation, account, `/api/event/${segment(id)}/sessions`);
-          if (parent.session_count !== undefined &&
-              integer(parent.session_count) !== sessions.length + 1) {
+          const sessionCount = parent.session_count === undefined
+            ? undefined : integer(parent.session_count);
+          const sessions = sessionCount === 1
+            ? [] : await list(operation, account, `/api/event/${segment(id)}/sessions`);
+          if (sessionCount !== undefined && sessionCount !== sessions.length + 1) {
             throw new ApiError('incomplete-refresh');
           }
           const eventRows = [
