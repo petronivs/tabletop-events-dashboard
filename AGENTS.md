@@ -54,3 +54,9 @@ Use Node.js 24 LTS (24.15+) or a compatible newer Node release. Development HMR 
 
 - Keep changes small and focused; match the style of surrounding code.
 - Update this file when you add commands, change the stack, or learn something future agents need to know.
+
+## Repository workflow
+
+- Before changes, search for an existing GitHub tracking issue; reuse it or create one if none covers the work.
+- Sync `main`, then create an issue-linked feature branch: `squad/{issue-number}-{slug}`.
+- Open a PR targeting `main` with `Closes #N`. Do not push directly to or merge into `main` without explicit authorization; pushes to `main` deploy automatically.

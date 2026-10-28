@@ -2,7 +2,7 @@ import type {
   BadgeChoice, ConventionChoice, DeveloperCredentials, LogoutResult, RequestOptions,
   Role, ScheduleSelection, ScheduleSnapshot, SessionState,
 } from '../domain';
-import { agendaRow } from '../domain/normalize';
+import { agendaRow, hostedDetailsComplete } from '../domain/normalize';
 import {
   flag, identity, integer, InvalidData, objectType, optionalIdentity, optionalText,
   record, text, timeZone, type RecordData,
@@ -91,11 +91,12 @@ function ownedBadges(
   return result;
 }
 
-function hostedMembership(items: readonly RecordData[]): Map<string, string> {
-  const result = new Map<string, string>();
+function hostedMembership(items: readonly RecordData[]): Map<string, RecordData> {
+  const result = new Map<string, RecordData>();
   for (const event of items) {
     objectType(event, 'event');
-    result.set(identity(event.id), identity(event.convention_id));
+    identity(event.convention_id);
+    result.set(identity(event.id), event);
   }
   return result;
 }
@@ -244,7 +245,10 @@ export function createScheduleClient(): ScheduleClient {
           operation, account, `/api/user/${segment(account.userId)}/badges`, { verified: '1' },
         ), account.userId);
         const hosted = hostedMembership(await list(operation, account, hostPath(account)));
-        const ids = [...new Set([...badges.map((badge) => badge.conventionId), ...hosted.values()])].sort();
+        const ids = [...new Set([
+          ...badges.map((badge) => badge.conventionId),
+          ...[...hosted.values()].map((event) => identity(event.convention_id)),
+        ])].sort();
         const choices: ConventionChoice[] = [];
         for (const id of ids) {
           choices.push(convention(await read(
@@ -268,7 +272,9 @@ export function createScheduleClient(): ScheduleClient {
         ), account.userId, cid);
         if (badges.length === 0) {
           const hosted = hostedMembership(await list(operation, account, hostPath(account)));
-          if (![...hosted.values()].includes(cid)) throw new ApiError('invalid-selection');
+          if (![...hosted.values()].some((event) => event.convention_id === cid)) {
+            throw new ApiError('invalid-selection');
+          }
         }
         return badges;
       });
@@ -284,12 +290,12 @@ export function createScheduleClient(): ScheduleClient {
         ), account.userId, cid);
         const available = new Set(badges.map((badge) => badge.id));
         if (selected.badgeIds.some((id) => !available.has(id)) ||
-            (badges.length === 0 && ![...hosted.values()].includes(cid))) {
+            (badges.length === 0 && ![...hosted.values()].some((event) => event.convention_id === cid))) {
           throw new ApiError('invalid-selection');
         }
         const roles = new Map<string, Set<Role>>();
-        for (const [id, conventionId] of hosted) {
-          if (conventionId === cid) roles.set(id, new Set<Role>(['hosting']));
+        for (const [id, event] of hosted) {
+          if (event.convention_id === cid) roles.set(id, new Set<Role>(['hosting']));
         }
         for (const badgeId of selected.badgeIds) {
           const tickets = await list(
@@ -325,7 +331,10 @@ export function createScheduleClient(): ScheduleClient {
         const rows: ScheduleSnapshot['rows'][number][] = [];
         const rowKeys = new Set<string>();
         for (const [id, membership] of roles) {
-          const parent = record(await read(operation, account, `/api/event/${segment(id)}`));
+          const hostedEvent = hosted.get(id);
+          if (hostedEvent !== undefined && hostedEvent.convention_id !== cid) throw new InvalidData();
+          const parent = hostedEvent !== undefined && hostedDetailsComplete(hostedEvent)
+            ? hostedEvent : record(await read(operation, account, `/api/event/${segment(id)}`));
           if (identity(parent.id) !== id) throw new InvalidData();
           const eventRoles = (['hosting', 'attending'] as const).filter((role) => membership.has(role));
           const first = agendaRow(parent, parent, cid, eventRoles, 'event');

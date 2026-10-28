@@ -265,7 +265,7 @@ describe('membership and staged snapshots', () => {
         { ...ticket, id: 'Unverified', verified: 0, event_id: 'Excluded' },
         { ...ticket, id: 'Unassigned', event_id: null, generic: 1 },
       ]);
-      if (call.url.pathname === '/api/event/Event') return response({ ...event, session_count: '2' });
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{ ...event, session_count: '2' }]);
       if (call.url.pathname === '/api/event/Event/sessions') return list([{
         id: 'Event', event_id: 'Event', convention_id: 'Convention',
         session_name: 'Additional session', start_date: null, duration: null,
@@ -286,7 +286,7 @@ describe('membership and staged snapshots', () => {
     ]);
     expect(snapshot.rows.every((row) => row.roles.join(',') === 'hosting,attending')).toBe(true);
     expect(snapshot.rows[1]).toMatchObject({ startUtc: null, endUtc: null, isScheduled: false });
-    expect(calls.filter((call) => call.url.pathname === '/api/event/Event')).toHaveLength(1);
+    expect(calls.filter((call) => call.url.pathname === '/api/event/Event')).toHaveLength(0);
     const qualifiers = calls.find((call) => call.url.pathname.endsWith('/tickets'))?.body;
     for (const key of ['collected', 'picked_up', 'for_reservation', 'generic', 'in_tournament',
       'event.is_cancelled', 'event.is_scheduled']) expect(qualifiers?.get(key)).toBe('');
@@ -297,8 +297,8 @@ describe('membership and staged snapshots', () => {
   });
 
   it.each([1, '1'])('skips additional-session requests when session_count is %s', async (sessionCount) => {
-    const calls = stubFetch((call) => call.url.pathname === '/api/event/Event'
-      ? response({ ...event, session_count: sessionCount }) : defaultResponse(call));
+    const calls = stubFetch((call) => call.url.pathname.endsWith('/events-hosted')
+      ? list([{ ...event, session_count: sessionCount }]) : defaultResponse(call));
     const client = createScheduleClient();
     await complete(client.login(credentials));
     const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
@@ -307,11 +307,12 @@ describe('membership and staged snapshots', () => {
       key: 'Convention:event:Event', roles: ['hosting', 'attending'],
     });
     expect(calls.some((call) => call.url.pathname === '/api/event/Event/sessions')).toBe(false);
+    expect(calls.some((call) => call.url.pathname === '/api/event/Event')).toBe(false);
   });
 
   it.each([undefined, 2, '2'])('fetches additional sessions when session_count is %s', async (sessionCount) => {
     const calls = stubFetch((call) => {
-      if (call.url.pathname === '/api/event/Event') return response({ ...event, session_count: sessionCount });
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{ ...event, session_count: sessionCount }]);
       if (call.url.pathname === '/api/event/Event/sessions') return list([{
         id: 'Additional', event_id: 'Event', convention_id: 'Convention',
         session_name: 'Additional session', start_date: null, duration: null,
@@ -326,6 +327,7 @@ describe('membership and staged snapshots', () => {
       'Convention:event:Event', 'Convention:eventsession:Additional',
     ]);
     expect(calls.filter((call) => call.url.pathname === '/api/event/Event/sessions')).toHaveLength(1);
+    expect(calls.some((call) => call.url.pathname === '/api/event/Event')).toBe(false);
   });
 
   it('supports hosting only, never reads unselected tickets, and refreshes hosting truth', async () => {
@@ -344,11 +346,117 @@ describe('membership and staged snapshots', () => {
   });
 
   it('loads ticket-only events even if the account hosts nothing', async () => {
-    stubFetch((call) => call.url.pathname.endsWith('events-hosted') ? list([]) : defaultResponse(call));
+    const calls = stubFetch((call) => call.url.pathname.endsWith('events-hosted') ? list([]) : defaultResponse(call));
     const client = createScheduleClient();
     await complete(client.login(credentials));
     const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
     expect(snapshot.rows[0]?.roles).toEqual(['attending']);
+    expect(calls.filter((call) => call.url.pathname === '/api/event/Event')).toHaveLength(1);
+  });
+
+  it('reuses complete hosted fields for canonical rows without requiring optional display fields', async () => {
+    const calls = stubFetch((call) => call.url.pathname.endsWith('/events-hosted')
+      ? list([{ ...event, event_number: undefined, session_count: '1' }]) : defaultResponse(call));
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
+    expect(snapshot).toMatchObject({
+      convention: { id: 'Convention', name: 'Synthetic convention' },
+      timeZone: 'America/Chicago',
+      rows: [{
+        key: 'Convention:event:Event', id: 'Event', objectType: 'event',
+        parentEventId: 'Event', conventionId: 'Convention', name: 'Synthetic event',
+        eventNumber: null, sessionName: null, roomName: null, spaceName: null,
+        startUtc: '2026-10-28T15:00:00.000Z', endUtc: '2026-10-28T16:30:00.000Z',
+        durationMinutes: 90, cancelled: false, trashed: false,
+        isScheduled: true, publishedToSchedule: true, roles: ['hosting', 'attending'],
+      }],
+    });
+    expect(calls.some((call) => call.url.pathname.startsWith('/api/event/'))).toBe(false);
+  });
+
+  it.each([
+    'name', 'is_cancelled', 'trashed', 'is_scheduled', 'published_to_schedule',
+    'start_date', 'duration',
+  ])('fetches one fresh detail for partial hosted data missing %s, including both roles', async (field) => {
+    const calls = stubFetch((call) => {
+      if (call.url.pathname.endsWith('/events-hosted')) return list([{ ...event, [field]: undefined }]);
+      if (call.url.pathname === '/api/event/Event') return response({
+        ...event, name: 'Fresh detail', start_date: '2026-10-29 17:00:00', session_count: 1,
+      });
+      return defaultResponse(call);
+    });
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    const snapshot = await complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] }));
+    expect(snapshot.rows).toHaveLength(1);
+    expect(snapshot.rows[0]).toMatchObject({
+      name: 'Fresh detail', startUtc: '2026-10-29T17:00:00.000Z',
+      endUtc: '2026-10-29T18:30:00.000Z', roles: ['hosting', 'attending'],
+    });
+    expect(calls.filter((call) => call.url.pathname === '/api/event/Event')).toHaveLength(1);
+    expect(calls.some((call) => call.url.pathname.endsWith('/sessions'))).toBe(false);
+  });
+
+  it('uses fresh hosted data rather than discovery or previous schedule objects', async () => {
+    let current: Record<string, unknown> = { ...event, session_count: '1' };
+    const calls = stubFetch((call) => call.url.pathname.endsWith('/events-hosted')
+      ? list([current]) : defaultResponse(call));
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    await complete(client.listConventions());
+    current = { ...current, name: 'First refresh', room_name: 'Room A' };
+    const selection = { conventionId: 'Convention', badgeIds: [] };
+    const first = await complete(client.loadSchedule(selection));
+    current = {
+      ...current, name: 'Second refresh', start_date: null, duration: null,
+      is_cancelled: '1', trashed: '1', is_scheduled: '0', published_to_schedule: '0',
+    };
+    const second = await complete(client.loadSchedule(selection));
+    expect(first.rows[0]).toMatchObject({
+      name: 'First refresh', startUtc: '2026-10-28T15:00:00.000Z', cancelled: false,
+    });
+    expect(second.rows[0]).toMatchObject({
+      name: 'Second refresh', roomName: 'Room A', startUtc: null, endUtc: null,
+      durationMinutes: null, cancelled: true, trashed: true,
+      isScheduled: false, publishedToSchedule: false, roles: ['hosting'],
+    });
+    expect(calls.filter((call) => call.url.pathname.endsWith('/events-hosted'))).toHaveLength(3);
+    expect(calls.some((call) => call.url.pathname.startsWith('/api/event/'))).toBe(false);
+  });
+
+  it.each([
+    { id: '..' }, { convention_id: '' }, { convention_id: 'Other' }, { object_type: 'badge' },
+    { name: null }, { is_cancelled: null }, { trashed: 2 }, { is_scheduled: true },
+    { published_to_schedule: '' }, { start_date: '2026-02-30 12:00:00' },
+    { start_date: '9999-12-31 23:59:59', duration: 1 },
+    { duration: '1e2' }, { session_count: '1.0' }, { session_count: null },
+    { event_number: -1 }, { room_name: 42 }, { space_name: false }, { session_name: [] },
+  ])('rejects malformed supplied hosted fields in complete and partial records: %j', async (fields) => {
+    for (const partial of [false, true]) {
+      const calls = stubFetch((call) => call.url.pathname.endsWith('/events-hosted')
+        ? list([{
+          ...event, ...(partial ? { ['name' in fields ? 'duration' : 'name']: undefined } : {}),
+          ...fields,
+        }])
+        : defaultResponse(call));
+      const client = createScheduleClient();
+      await complete(client.login(credentials));
+      await expect(complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] })))
+        .rejects.toHaveProperty('code', 'invalid-response');
+      expect(calls.some((call) => call.url.pathname === '/api/event/Event')).toBe(false);
+    }
+  });
+
+  it.each([0, 2, '2'])('retains session-count consistency checks for hosted session_count %s', async (sessionCount) => {
+    const calls = stubFetch((call) => call.url.pathname.endsWith('/events-hosted')
+      ? list([{ ...event, session_count: sessionCount }]) : defaultResponse(call));
+    const client = createScheduleClient();
+    await complete(client.login(credentials));
+    await expect(complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: [] })))
+      .rejects.toHaveProperty('code', 'incomplete-refresh');
+    expect(calls.filter((call) => call.url.pathname.endsWith('/sessions'))).toHaveLength(1);
+    expect(calls.some((call) => call.url.pathname === '/api/event/Event')).toBe(false);
   });
 
   it.each([
@@ -359,7 +467,12 @@ describe('membership and staged snapshots', () => {
     ['missing timezone', '/api/geolocation/Location', () => response({ id: 'Location' }), 'invalid-response'],
     ['missing sessions', '/api/event/Event', () => response({ ...event, session_count: 2 }), 'incomplete-refresh'],
   ] as const)('fails the entire staged snapshot on %s', async (_label, path, makeResponse, code) => {
-    stubFetch((call) => call.url.pathname === path ? makeResponse() : defaultResponse(call));
+    stubFetch((call) => {
+      if (call.url.pathname.endsWith('/events-hosted')) {
+        return list([{ id: event.id, convention_id: event.convention_id }]);
+      }
+      return call.url.pathname === path ? makeResponse() : defaultResponse(call);
+    });
     const client = createScheduleClient();
     await complete(client.login(credentials));
     await expect(complete(client.loadSchedule({ conventionId: 'Convention', badgeIds: ['Badge'] })))
@@ -502,6 +615,9 @@ describe('session, cancellation and logout races', () => {
       }
       if (call.url.pathname === '/api/event/Event') {
         return new Promise<Response>((resolve) => { resolveRead = resolve; });
+      }
+      if (call.url.pathname === '/api/user/User/events-hosted') {
+        return list([{ id: event.id, convention_id: event.convention_id }]);
       }
       if (call.url.pathname.startsWith('/api/user/ReplacementUser/')) return list([]);
       return defaultResponse(call);
