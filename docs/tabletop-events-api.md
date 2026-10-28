@@ -398,3 +398,14 @@ The approved implementation uses the public contracts in `src/api/index.ts` and
 for the memory-only boundary and current acceptance limits. Basic live login and
 event loading have since been user-verified; detailed private-data edge cases and
 schedule correctness still require comparison with the real schedule.
+
+Schedule refreshes reuse Event objects from that refresh's `events-hosted`
+response when the name, cancellation/trash and schedule/publication flags,
+start date, and duration are supplied. Explicit null/empty times and durations
+retain their normal unscheduled/unknown meaning; missing schedule fields trigger
+a validated detail read instead. Optional display fields and `session_count`
+need not be present. Missing counts still fetch additional sessions; numeric or
+string counts of one skip that request, and other counts are consistency-checked.
+Malformed supplied hosted fields fail validation rather than being hidden by a
+detail fallback. Ticket-only events still require detail reads. No hosted objects
+are retained across operations or refreshes.
